@@ -1,0 +1,430 @@
+[gd_scene load_steps=4 format=2]
+
+[ext_resource path="res://RaymarchFreecam.gd" type="Script" id=1]
+
+[sub_resource type="Shader" id=1]
+code = "shader_type canvas_item;
+
+uniform vec4 sunlight_color:hint_color = vec4(1.0);
+uniform vec3 sunlight_direction = vec3(0.0, -1.0, 0.0);
+uniform float light_penumbra:hint_range(1, 128) = 4.0;
+uniform float shadow_min_dist:hint_range(1, 16) = 1.0;
+
+uniform vec4 sky_color:hint_color = vec4(0.769, 0.918, 1.0, 1.0);
+uniform vec4 sun_color:hint_color = vec4(1.0);
+uniform float sun_radius:hint_range(0,2) = .25;
+uniform float sun_sharpness:hint_range(0, 1) = .1;
+
+uniform float ground_height = -1.0;
+uniform float ground_tex_frequency = 1.0;
+uniform float ground_tex_scale = 0.1;
+uniform vec4 ground_albedo:hint_color = vec4(1.0);
+
+uniform vec3 box_pos = vec3(0.0);
+uniform float box_rounding:hint_range(0,1) = 0.01;
+uniform float box_size:hint_range(0, 2) = 1.0;
+uniform vec4 box_albedo:hint_color = vec4(1.0);
+
+uniform vec3 sphere_pos = vec3(0.0);
+uniform float sphere_radius:hint_range(0,2) = 0.75;
+uniform vec4 sphere_albedo:hint_color = vec4(1.0);
+
+uniform float shell_thickness:hint_range(0,1) = 0.05;
+
+uniform float blend_size:hint_range(0,1) = 0.1;
+// END SHAPE DEFINITIONS
+
+uniform vec3 camera_position = vec3(0.0, 0.0, 5.0);
+uniform mat3 camera_rotation = mat3(1.0);
+uniform float focal_length = 1.0;
+
+uniform int max_steps = 256;
+uniform float step_mult:hint_range(0,1) = 1.0;
+uniform float surface_distance = 0.001;
+uniform float max_distance = 100.0;
+
+uniform float aspect_ratio = 1.7777;
+
+uvec3 murmurHash31(uint src) {
+    const uint M = uint(1540483477);
+    uvec3 h = uvec3(uint(1190494759), uint(2147483647), uint(3559788179));
+    src *= M;
+	src = src^(src>>uint(24));
+	src *= M;
+    h *= M;
+	h = uvec3(h.x^src, h.y^src, h.z^src);
+    h = h^uvec3(h.x>>uint(13), h.y>>uint(13), h.z>>uint(13));
+	h *= M;
+	h = h^uvec3(h.x>>uint(15), h.y>>uint(15), h.z>>uint(15));
+    return h;
+}
+
+vec3 hash31(float src) {
+    uvec3 h = murmurHash31(floatBitsToUint(src));
+    return uintBitsToFloat(uvec3(
+		h.x & uint(8388607) | uint(1065353216),
+		h.y & uint(8388607) | uint(1065353216),
+		h.z & uint(8388607) | uint(1065353216))) - 1.0;
+}
+
+uint murmurHash13(uvec3 src) {
+    const uint M = uint(1540483477);
+    uint h = uint(1190494759);
+    src *= M;
+	src = src^(src>>uint(24)); src *= M;
+    h *= M; h = h^src.x; h *= M; h = h^src.y; h *= M; h = h^src.z;
+    h = h^(h>>uint(13)); h *= M; h = h^(h>>uint(15));
+    return h;
+}
+
+float hash13(vec3 src) {
+    uint h = murmurHash13(floatBitsToUint(src));
+    return uintBitsToFloat(h & uint(8388607) | uint(1065353216)) - 1.0;
+}
+
+uvec3 murmurHash33(uvec3 src) {
+    const uint M = uint(1540483477);
+    uvec3 h = uvec3(uint(1190494759), uint(2147483647), uint(3559788179));
+    src *= M;
+	src = src^(src>>uint(24));
+	src *= M;
+    h *= M;
+	h = uvec3(h.x^src.x, h.y^src.x, h.z^src.x);
+	h *= M;
+	h = uvec3(h.x^src.y, h.y^src.y, h.z^src.y);
+	h *= M;
+	h = uvec3(h.x^src.z, h.y^src.z, h.z^src.z);
+    h = h^(h>>uint(13));
+	h *= M;
+	h = h^(h>>uint(15));
+    return h;
+}
+
+vec3 hash33(vec3 src) {
+    uvec3 h = murmurHash33(floatBitsToUint(src));
+    return uintBitsToFloat(uvec3(
+		h.x & uint(8388607) | uint(1065353216),
+		h.y & uint(8388607) | uint(1065353216),
+		h.z & uint(8388607) | uint(1065353216)
+		)) - 1.0;
+}
+
+vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
+vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+
+float snoise(vec3 v){ 
+  const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+  const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+
+// First corner
+  vec3 i  = floor(v + dot(v, C.yyy) );
+  vec3 x0 =   v - i + dot(i, C.xxx) ;
+
+// Other corners
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min( g.xyz, l.zxy );
+  vec3 i2 = max( g.xyz, l.zxy );
+
+  //  x0 = x0 - 0. + 0.0 * C 
+  vec3 x1 = x0 - i1 + 1.0 * C.xxx;
+  vec3 x2 = x0 - i2 + 2.0 * C.xxx;
+  vec3 x3 = x0 - 1. + 3.0 * C.xxx;
+
+// Permutations
+  i = mod(i, 289.0 ); 
+  vec4 p = permute( permute( permute( 
+             i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
+           + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) 
+           + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+
+// Gradients
+// ( N*N points uniformly over a square, mapped onto an octahedron.)
+  float n_ = 1.0/7.0; // N=7
+  vec3  ns = n_ * D.wyz - D.xzx;
+
+  vec4 j = p - 49.0 * floor(p * ns.z *ns.z);  //  mod(p,N*N)
+
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_ );    // mod(j,N)
+
+  vec4 x = x_ *ns.x + ns.yyyy;
+  vec4 y = y_ *ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+
+  vec4 b0 = vec4( x.xy, y.xy );
+  vec4 b1 = vec4( x.zw, y.zw );
+
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+
+  vec3 p0 = vec3(a0.xy,h.x);
+  vec3 p1 = vec3(a0.zw,h.y);
+  vec3 p2 = vec3(a1.xy,h.z);
+  vec3 p3 = vec3(a1.zw,h.w);
+
+//Normalise gradients
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+  p0 *= norm.x;
+  p1 *= norm.y;
+  p2 *= norm.z;
+  p3 *= norm.w;
+
+// Mix final noise value
+  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), 
+                                dot(p2,x2), dot(p3,x3) ) );
+}
+
+uniform float scale = 1.0;
+
+vec2 hash22(vec2 p) {
+	vec3 p3 = fract(vec3(p.xyx) * vec3(.1031, .1030, .0973));
+    p3 += dot(p3, p3.yzx+33.33);
+    return fract((p3.xx+p3.yz)*p3.zy);
+}
+
+float voronoiDistance(vec2 x) {
+	vec2 p = floor(x);
+	vec2 f = fract(x);
+
+	vec2 mb;
+	vec2 mr;
+
+	float res = 8.0;
+	for( int j=-1; j<=1; j++ ) 
+	for( int i=-1; i<=1; i++ ) {
+		vec2 b = vec2(ivec2(i, j));
+		vec2  r = vec2(b) + hash22(p+b+34715.26)-f;
+		float d = dot(r,r);
+		if( d < res ) {
+			res = d;
+			mr = r;
+			mb = b;
+		}
+	}
+
+	res = 8.0;
+	for( int j=-2; j<=2; j++ )
+	for( int i=-2; i<=2; i++ ) {
+		vec2 b = mb + vec2(ivec2(i, j));
+		vec2  r = vec2(b) + hash22(p+b+34715.26) - f;
+		float d = dot(0.5*(mr+r), normalize(r-mr));
+
+		res = min( res, d );
+	}
+
+	return res;
+}
+
+///////////////////////////////
+// Signed Distance Functions //
+///////////////////////////////
+
+float sdSphere(vec3 p, float r) {
+	return length(p) - r;
+}
+
+float sdBox( vec3 p, vec3 b ) {
+  vec3 q = abs(p) - b;
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+
+float sdRoundBox(vec3 p, vec3 b, float r) {
+  return sdBox(p, b-r)-r;
+}
+
+float sdCappedCylinder( vec3 p, float h, float r ) {
+  vec2 d = abs(vec2(length(p.xz),p.y)) - vec2(h,r);
+  return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+float sdCylinder( vec3 p, vec3 c )
+{
+  return length(p.xz-c.xy)-c.z;
+}
+
+float sdBoxFrame( vec3 p, vec3 b, float e ) {
+  p = abs(p  )-b;
+  vec3 q = abs(p+e)-e;
+  return min(min(
+      length(max(vec3(p.x,q.y,q.z),0.0))+min(max(p.x,max(q.y,q.z)),0.0),
+      length(max(vec3(q.x,p.y,q.z),0.0))+min(max(q.x,max(p.y,q.z)),0.0)),
+      length(max(vec3(q.x,q.y,p.z),0.0))+min(max(q.x,max(q.y,p.z)),0.0));
+}
+
+float sdPlane( vec3 p, vec3 n, float h )
+{
+  return dot(p,n) + h;
+}
+
+///////////////////////////////
+////// Boolean Functions //////
+///////////////////////////////
+
+float opUnion( float d1, float d2 )
+{
+    return min(d1,d2);
+}
+
+float opSubtraction( float d1, float d2 )
+{
+    return max(-d1,d2);
+}
+
+float opIntersection( float d1, float d2 )
+{
+    return max(d1,d2);
+}
+
+float opSmoothUnion( float d1, float d2, float k )
+{
+    float h = max(k-abs(d1-d2),0.0);
+    return min(d1, d2) - h*h*0.25/k;
+}
+
+float opSmoothIntersection( float d1, float d2, float k )
+{
+    float h = max(k-abs(d1-d2),0.0);
+    return max(d1, d2) + h*h*0.25/k;
+}
+
+float opSmoothDifference( float d1, float d2, float k )
+{
+	return opSmoothIntersection(d1, -d2, k);
+}
+
+vec4 blend(vec4 d1, vec4 d2, float d) {
+	return vec4(mix(d1.rgb, d2.rgb, clamp(abs(d1.w-d)/(abs(d1.w)+abs(d2.w)), 0.0, 1.0)), d);
+}
+
+/////////////////////////////
+// Distance Field Function //
+/////////////////////////////
+
+vec4 dist_field(vec3 pos, float time) {
+	vec4 result;
+	
+	vec4 box = vec4(box_albedo.rgb, sdRoundBox(pos-box_pos, vec3(box_size), box_rounding));
+	vec4 sphere = vec4(sphere_albedo.rgb, abs(sdSphere(pos-sphere_pos, sphere_radius))-shell_thickness);
+	vec4 ground = vec4(ground_albedo.rgb, pos.y-ground_height);
+	result = blend(box, sphere, opSmoothIntersection(box.w, sphere.w, blend_size));
+	result = blend(result, ground, opUnion(result.w, ground.w));
+	return result;
+}
+
+vec3 get_normal(vec3 pos, float ep, float time) {
+    vec2 e = vec2(1.0,-1.0)*0.5773;
+    return normalize( e.xyy*dist_field(pos+e.xyy*ep, time).w + 
+					  e.yyx*dist_field( pos + e.yyx*ep, time).w + 
+					  e.yxy*dist_field( pos + e.yxy*ep, time).w + 
+					  e.xxx*dist_field( pos + e.xxx*ep, time).w);
+}
+
+vec3 sky_shader(vec3 dir, float time) {
+	return mix(sky_color.rgb, sun_color.rgb, smoothstep(1.0-sun_radius, mix(1.0, 1.0-sun_radius, sun_sharpness), dot(dir, -normalize(sunlight_direction))));
+}
+
+vec4 single_ray(vec3 origin, vec3 dir, float time) {
+	float dist = 0.0;
+	vec4 field = dist_field(origin, time);
+	for(int i = 0; i < max_steps; i++) {
+		dist += field.w*step_mult;
+		field = dist_field(origin+dir*dist, time);
+		if(abs(field.w) < (surface_distance*dist/max_distance) || dist > max_distance) {
+			break;
+		}
+	}
+	if(dist > max_distance) {
+		return vec4(sky_shader(dir, time), dist);
+	} else {
+		return vec4(field.rgb, dist);
+	}
+}
+
+float soft_shadow(vec3 pos, float time) {
+	float dist = shadow_min_dist*surface_distance;
+	vec3 dir = normalize(-sunlight_direction);
+	vec4 field;
+	float nearest = 1.0;
+	for(int i = 0; i < max_steps; i++) {
+		field = dist_field(pos+dir*dist, time);
+		dist += field.w*step_mult;
+		nearest = min(nearest, light_penumbra*field.w/dist);
+		if(field.w < surface_distance) return 0.0;
+		if(dist > max_distance) break;
+	}
+	return nearest;
+}
+
+vec3 get_light(vec3 pos, vec3 norm, float time) {
+	vec3 direct_light = sunlight_color.rgb*soft_shadow(pos, time)*clamp(dot(-normalize(sunlight_direction), norm), 0.0, 1.0);
+	
+	return direct_light;
+}
+
+vec3 raymarch(vec3 origin, vec3 dir, float time) {
+	vec4 ray = single_ray(origin, dir, time);
+	if(ray.w > max_distance) return ray.rgb;
+	vec3 pos = origin+dir*ray.w;
+	vec3 norm = get_normal(pos, surface_distance*(ray.w/max_distance), time);
+	vec3 light = get_light(pos, norm, time);
+	return ray.rgb*light;
+}
+
+void fragment() {
+	vec3 origin = camera_position;
+	vec3 dir = normalize(vec3((UV-0.5) * vec2(aspect_ratio, -1.0), -focal_length))*camera_rotation;
+	COLOR.rgb = raymarch(origin, dir, TIME);
+}"
+
+[sub_resource type="ShaderMaterial" id=2]
+shader = SubResource( 1 )
+shader_param/sunlight_color = Color( 1, 1, 1, 1 )
+shader_param/sunlight_direction = Vector3( 0.756, -1.006, -0.891 )
+shader_param/light_penumbra = 48.985
+shader_param/shadow_min_dist = 13.994
+shader_param/sky_color = Color( 0.0117647, 0, 0.141176, 1 )
+shader_param/sun_color = Color( 1, 0.929412, 0.654902, 1 )
+shader_param/sun_radius = 0.01
+shader_param/sun_sharpness = 0.444
+shader_param/ground_height = -1.308
+shader_param/ground_tex_frequency = 2.357
+shader_param/ground_tex_scale = 0.01
+shader_param/ground_albedo = Color( 0.666667, 0.666667, 0.666667, 1 )
+shader_param/box_pos = Vector3( 0, 0, 0 )
+shader_param/box_rounding = 0.005
+shader_param/box_size = 1.271
+shader_param/box_albedo = Color( 1, 0, 0, 1 )
+shader_param/sphere_pos = Vector3( 0, 0, 0 )
+shader_param/sphere_radius = 1.632
+shader_param/sphere_albedo = Color( 1, 0.831373, 0, 1 )
+shader_param/shell_thickness = 0.075
+shader_param/blend_size = 0.05
+shader_param/camera_position = Vector3( 1.861, 2.831, 5.061 )
+shader_param/camera_rotation = Basis( 0.952638, 0, -0.304106, -0.149253, 0.871276, -0.467548, 0.26496, 0.490793, 0.830011 )
+shader_param/focal_length = 1.0
+shader_param/max_steps = 256
+shader_param/step_mult = 0.5
+shader_param/surface_distance = 0.001
+shader_param/max_distance = 100.0
+shader_param/aspect_ratio = 1.70667
+shader_param/scale = 1.0
+
+[node name="Test3" type="ColorRect"]
+material = SubResource( 2 )
+anchor_right = 1.0
+anchor_bottom = 1.0
+focus_mode = 2
+mouse_filter = 1
+script = ExtResource( 1 )
+__meta__ = {
+"_edit_use_anchors_": false
+}
+camera_position = Vector3( 1.861, 2.831, 5.061 )
+camera_rotation = Vector3( 0.513, -0.309, 0 )

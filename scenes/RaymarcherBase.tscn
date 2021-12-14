@@ -1,0 +1,373 @@
+[gd_scene load_steps=6 format=2]
+
+[ext_resource path="res://RaymarchFreecam.gd" type="Script" id=1]
+
+[sub_resource type="Shader" id=1]
+code = "shader_type canvas_item;
+
+const float pi = 3.14159;
+
+uniform float speed = 1.0;
+
+uniform vec3 camera_position = vec3(0.0, 0.0, 5.0);
+uniform mat3 camera_rotation = mat3(1.0);
+uniform float focal_length = 1.0;
+
+uniform int max_steps = 256;
+uniform float global_step_mult:hint_range(0,1) = 1.0;
+uniform float surface_distance = 0.001;
+uniform float max_distance = 100.0;
+
+uniform float aspect_ratio = 1.7777;
+uniform float gamma = 2.2;
+
+///////////////////////////////
+// Signed Distance Functions //
+///////////////////////////////
+
+float sdSphere(vec3 p, float r) {
+	return length(p) - r;
+}
+
+float sdBox( vec3 p, vec3 b ) {
+  vec3 q = abs(p) - b;
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0);
+}
+
+///////////////////////////////
+///////// Operations //////////
+///////////////////////////////
+
+float opShell(float d, float thickness) {
+	return abs(d) - thickness;
+}
+
+float opUnion( float d1, float d2 ) {
+    return min(d1,d2);
+}
+
+mat3 opMatUnion( mat3 m1, mat3 m2 ) {
+    return (m1[0][0] < m2[0][0])? m1 : m2;
+}
+
+float opIntersection( float d1, float d2 ) {
+    return max(d1,d2);
+}
+
+mat3 opMatIntersection(mat3 m1, mat3 m2) {
+	return (m1[0][0] > m2[0][0]) ? m1 : m2;
+}
+
+float opDifference( float d1, float d2 ) {
+    return max(d1,-d2);
+}
+
+mat3 opMatDifference(mat3 m1, mat3 m2) {
+	m2[0] *= -1.0;
+	return (m1[0][0] > m2[0][0]) ? m1 : m2;
+}
+
+float opSmoothUnion( float d1, float d2, float k ) {
+    float h = max(k-abs(d1-d2),0.0);
+    return min(d1, d2) - h*h*0.25/k;
+}
+
+float opSmoothIntersection( float d1, float d2, float k ) {
+    float h = max(k-abs(d1-d2),0.0);
+    return max(d1, d2) + h*h*0.25/k;
+}
+
+float opSmoothDifference( float d1, float d2, float k ) {
+	return opSmoothIntersection(d1, -d2, k);
+}
+
+mat3 blend(float d, mat3 m1, mat3 m2) {
+	if(m1[0][0] == d) return m1;
+	if(m2[0][0] == d) return m2;
+	float d1 = m1[0][0];
+	float d2 = m2[0][0];
+	float factor = clamp(abs(d1-d)/(abs(d1+d2)), 0.0, 1.0);
+	return mat3(
+		vec3(d),
+		mix(m1[1], m2[1], factor),
+		mix(m1[2], m2[2], factor)
+	);
+}
+
+/////////////////////////////
+// Distance Field Function //
+/////////////////////////////
+
+uniform vec3 sphere_pos = vec3(0.0);
+uniform float sphere_size = 1.0;
+uniform vec4 sphere_albedo:hint_color = vec4(1.0);
+uniform float sphere_roughness:hint_range(0,1) = 1.0;
+uniform float sphere_metallic:hint_range(0,1) = 0.0;
+uniform float sphere_specular:hint_range(0,1) = 0.5;
+
+uniform vec3 box_pos = vec3(0.0);
+uniform vec3 box_size = vec3(0.5);
+uniform vec4 box_albedo:hint_color = vec4(1.0);
+uniform float box_roughness:hint_range(0,1) = 1.0;
+uniform float box_metallic:hint_range(0,1) = 0.0;
+uniform float box_specular:hint_range(0,1) = 0.5;
+
+uniform float ground_pos = -1.0;
+uniform vec4 ground_albedo:hint_color = vec4(1.0);
+uniform float ground_roughness:hint_range(0,1) = 1.0;
+uniform float ground_metallic:hint_range(0,1) = 0.0;
+uniform float ground_specular:hint_range(0,1) = 0.5;
+
+float dist_field(vec3 pos, float time) {
+	float result;
+	result = sdSphere(pos, sphere_size);
+	result = opUnion(result, sdBox(pos-box_pos, box_size));
+//	result = opUnion(result, pos.y-ground_pos);
+	return result;
+}
+
+mat3 compose_material(in float dist, in vec3 albedo, in float roughness, in float metallic, in float specular) {
+	return mat3(
+		vec3(dist),
+		albedo,
+		vec3(roughness, metallic, specular));
+}
+
+void decompose_material(in mat3 material, out float dist, out vec3 albedo, out float roughness, out float metallic, out float specular) {
+	dist = material[0][0];
+	albedo = material[1];
+	roughness = material[2][0];
+	metallic = material[2][1];
+	specular = material[2][2];
+}
+
+mat3 get_material(vec3 pos, float time) {
+	mat3 result =
+		compose_material(sdSphere(pos-sphere_pos, sphere_size), sphere_albedo.rgb, sphere_roughness, sphere_metallic, sphere_specular);
+		
+	result = opMatUnion(result,
+		compose_material(sdBox(pos-box_pos, box_size), box_albedo.rgb, box_roughness, box_metallic, box_specular));
+		
+	result = opMatUnion(result,
+		compose_material(pos.y-ground_pos, ground_albedo.rgb, ground_roughness, ground_metallic, ground_specular));
+		
+	return result;
+}
+
+vec3 get_normal(vec3 pos, float ep, float time) {
+    vec2 e = vec2(1.0,-1.0)*0.5773;
+    return normalize( e.xyy*dist_field(pos+e.xyy*ep, time) + 
+					  e.yyx*dist_field( pos + e.yyx*ep, time) + 
+					  e.yxy*dist_field( pos + e.yxy*ep, time) + 
+					  e.xxx*dist_field( pos + e.xxx*ep, time));
+}
+
+uniform sampler2D sky_color:hint_albedo;
+uniform float horizon_sharpness = 5.0;
+uniform vec4 sun_color:hint_color = vec4(1.0);
+uniform float sun_radius:hint_range(0,2) = .003;
+uniform float sun_sharpness:hint_range(0, 1) = .25;
+
+uniform vec4 ambient_light_color:hint_color = vec4(1.0);
+uniform float ambient_light_intensity:hint_range(0,1) = 0.1;
+uniform vec4 sunlight_color:hint_color = vec4(1.0);
+uniform vec3 sunlight_direction = vec3(0.0, -1.0, 0.0);
+uniform float sunlight_intensity = 1.0;
+uniform float light_penumbra:hint_range(1, 128) = 4.0;
+uniform float shadow_min_dist:hint_range(0, 16) = 0.0;
+uniform float shadow_darkness:hint_range(0,1) = 1.0;
+uniform float shadow_step_mult:hint_range(0,1) = 0.5;
+
+vec3 sky_shader(vec3 dir, float time) {
+	float sun = smoothstep(mix(-1.0, sun_radius-1.0, sun_sharpness), -1.0, dot(dir, normalize(sunlight_direction)));
+	vec3 sky = texture(sky_color, vec2(0.5+0.5*dot(dir, vec3(0.0, -1.0, 0.0)), 0.0)).rgb;
+	return mix(sky, sun_color.rgb, sun);
+}
+
+float soft_shadow(vec3 pos, vec3 dir, float max_dist, float time) {
+	float dist = min(surface_distance, shadow_min_dist);
+	float result = 1.0;
+	float prev_df = 1e10;
+	for(int i = 0; i < max_steps; i++) {
+		float df = dist_field(pos+dir*dist, time);
+		float y = df*df/(2.0*prev_df);
+		float d = length(vec2(df, y));
+		result = min(result, light_penumbra*d/max(0, dist-y));
+		prev_df = df;
+		dist += df*global_step_mult*shadow_step_mult;
+		if(df < surface_distance) return 0.0;
+		if(dist > max_dist) break;
+	}
+	return result;
+}
+
+float hard_shadow(vec3 pos, vec3 dir, float max_dist, float time) {
+	float dist = min(surface_distance, shadow_min_dist);
+	for(int i = 0; i < max_steps; i++) {
+		float df = dist_field(pos+dir*dist, time);
+		dist += df*global_step_mult*shadow_step_mult;
+		if(df < surface_distance) return 0.0;
+		if(dist > max_dist) break;
+	}
+	return 1.0;
+}
+
+uniform float ao_intensity:hint_range(0,1) = 0.5;
+uniform float ao_falloff = 0.5;
+uniform float ao_size = 0.1;
+uniform int ao_steps = 5;
+
+float calc_ao(vec3 pos, vec3 norm, float time) {
+	float step_size = ao_size/float(ao_steps);
+	float dist = ao_size;
+	float ao = 0.0;
+	float factor = ao_falloff;
+	for(int i = 0; i < ao_steps; i++) {
+		float df = max(dist_field(pos+norm*dist, time), 0.0);
+		ao += factor*max(dist-df, 0.0)/dist;
+		dist += step_size;
+		factor *= ao_falloff;
+	}
+	return 1.0 - ao*ao_intensity;
+}
+
+float sqr(float x) {
+	return x*x;
+}
+
+float schlick_fresnel(float u) {
+	return pow(clamp(1.0-u, 0.0, 1.0), 5.0);
+}
+
+float disney_diffuse(float roughness, float NdotL, float NdotV, float LdotH) {
+	float FL = schlick_fresnel(NdotL), FV = schlick_fresnel(NdotV);
+	float Fd90 = 0.5 + 2.0 * LdotH*LdotH * roughness;
+	return mix(1.0, Fd90, FL) * mix(1.0, Fd90, FV);
+}
+
+vec3 shade(vec3 pos, vec3 norm, vec3 view, float time) {
+	vec3 albedo;
+	float dist, roughness, metallic, specular;
+	
+	float ao = calc_ao(pos, norm, time);
+	
+	decompose_material(get_material(pos, time), dist, albedo, roughness, metallic, specular);
+	vec3 base_color = pow(albedo, vec3(gamma));
+	vec3 color = (1.0 - metallic) * base_color * ambient_light_color.rgb * ambient_light_intensity * ao;
+	
+	vec3 N = normalize(norm);
+	vec3 V = normalize(-view);
+	vec3 L = normalize(-sunlight_direction);
+	float NdotL = dot(N, L);
+	float NdotV = dot(N, V);
+	
+	if(NdotL >= 0.0 && NdotV >= 0.0) {
+		vec3 H = normalize(L + V);
+		float NdotH = dot(N, H);
+		float LdotH = dot(H, L);
+
+		
+		float shadow = soft_shadow(pos, L, max_distance, time);
+		color += shadow*max(NdotL, 0.0)*(1.0/pi)*disney_diffuse(roughness, NdotL, NdotV, LdotH)*base_color*(1.0-metallic);
+	}
+	return pow(color, vec3(1.0/gamma));
+}
+
+vec4 single_ray(vec3 origin, vec3 dir, float time) {
+	float dist = 0.0;
+	for(int i = 0; i < max_steps; i++) {
+		float df = dist_field(origin+dir*dist, time);
+		dist += df*global_step_mult;
+		if(abs(df) < surface_distance*clamp(2.0*df/max_distance, 0.1, 1.0) || dist > max_distance) {
+			break;
+		}
+	}
+	return vec4(origin+dir*dist, dist);
+}
+
+vec3 raymarch(vec3 origin, vec3 dir, float time) {
+	if(dist_field(origin, time) < 0.0) return vec3(0.25+0.25*dot(dir, get_normal(origin, surface_distance, time)));
+	
+	vec4 ray = single_ray(origin, dir, time);
+	if(ray.w > max_distance) return sky_shader(dir, time);
+	vec3 norm = get_normal(ray.xyz, surface_distance*clamp(2.0*ray.w/max_distance, 0.1, 1.0), time);
+	vec3 pos = ray.xyz + norm*surface_distance;
+	
+	return shade(pos, norm, dir, time);
+}
+
+void fragment() {
+	vec3 origin = camera_position;
+	vec3 dir = normalize(vec3((UV-0.5) * vec2(aspect_ratio, -1.0), -focal_length)*camera_rotation);
+	vec3 color = raymarch(origin, dir, TIME*speed);
+	COLOR.rgb = color;
+}"
+
+[sub_resource type="Gradient" id=2]
+offsets = PoolRealArray( 0.298182, 0.498182, 0.585455, 1 )
+colors = PoolColorArray( 0.756863, 0.976471, 1, 1, 0.717855, 0.926144, 0.948461, 1, 0.243137, 0.317647, 0.321569, 1, 0.105469, 0.138867, 0.140625, 1 )
+
+[sub_resource type="GradientTexture" id=3]
+gradient = SubResource( 2 )
+width = 128
+
+[sub_resource type="ShaderMaterial" id=4]
+shader = SubResource( 1 )
+shader_param/speed = 1.0
+shader_param/camera_position = Vector3( -2.43, 1.191, 1.935 )
+shader_param/camera_rotation = Basis( 0.552863, 2.98023e-08, 0.833272, 0.311398, 0.927548, -0.206608, -0.7729, 0.373705, 0.512807 )
+shader_param/focal_length = 1.0
+shader_param/max_steps = 256
+shader_param/global_step_mult = 1.0
+shader_param/surface_distance = 0.001
+shader_param/max_distance = 100.0
+shader_param/aspect_ratio = 1.70667
+shader_param/gamma = 2.2
+shader_param/sphere_pos = Vector3( 0, 0, 0 )
+shader_param/sphere_size = 1.0
+shader_param/sphere_albedo = Color( 1, 0, 0, 1 )
+shader_param/sphere_roughness = 1.0
+shader_param/sphere_metallic = 0.0
+shader_param/sphere_specular = 0.5
+shader_param/box_pos = Vector3( 0.597, -0.05, 0.802 )
+shader_param/box_size = Vector3( 0.5, 0.5, 0.5 )
+shader_param/box_albedo = Color( 0.0392157, 0, 1, 1 )
+shader_param/box_roughness = 1.0
+shader_param/box_metallic = 0.0
+shader_param/box_specular = 0.5
+shader_param/ground_pos = -1.0
+shader_param/ground_albedo = Color( 0.156863, 0.376471, 0.235294, 1 )
+shader_param/ground_roughness = 1.0
+shader_param/ground_metallic = 0.0
+shader_param/ground_specular = 0.5
+shader_param/horizon_sharpness = 20.0
+shader_param/sun_color = Color( 1, 1, 1, 1 )
+shader_param/sun_radius = 0.003
+shader_param/sun_sharpness = 0.25
+shader_param/ambient_light_color = Color( 1, 1, 1, 1 )
+shader_param/ambient_light_intensity = 0.1
+shader_param/sunlight_color = Color( 1, 1, 1, 1 )
+shader_param/sunlight_direction = Vector3( 1.5, -1, 1 )
+shader_param/sunlight_intensity = 1.0
+shader_param/light_penumbra = 40.0
+shader_param/shadow_min_dist = 0.001
+shader_param/shadow_darkness = 1.0
+shader_param/shadow_step_mult = 0.5
+shader_param/ao_intensity = 0.5
+shader_param/ao_falloff = 0.5
+shader_param/ao_size = 0.1
+shader_param/ao_steps = 3
+shader_param/sky_color = SubResource( 3 )
+
+[node name="RaymarcherBase" type="ColorRect"]
+material = SubResource( 4 )
+anchor_right = 1.0
+anchor_bottom = 1.0
+margin_right = -6.10352e-05
+script = ExtResource( 1 )
+__meta__ = {
+"_edit_lock_": true,
+"_edit_use_anchors_": false
+}
+camera_position = Vector3( -2.43, 1.191, 1.935 )
+camera_rotation = Vector3( 0.383, 0.985, 0 )
